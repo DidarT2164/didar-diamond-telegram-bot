@@ -1,7 +1,13 @@
+
 import { Telegraf, Markup } from "telegraf";
+
+if (!process.env.BOT_TOKEN) {
+  throw new Error("BOT_TOKEN is missing in Render Environment");
+}
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_CHAT_ID;
+const PAYMENT_NUMBER = "01337445694";
 
 const products = [
   ["25 Diamonds", 25],
@@ -33,42 +39,45 @@ const menu = Markup.keyboard([
 
 bot.start((ctx) => {
   users.delete(ctx.from.id);
-  ctx.reply(
-    "💎 WELCOME TO DIDAR DIAMOND STORE!\n\n" +
-    "আপনার পছন্দের সার্ভিস নির্বাচন করুন।",
+
+  return ctx.reply(
+    "💎 WELCOME TO DIDAR DIAMOND STORE!\n\nআপনার পছন্দের সার্ভিস নির্বাচন করুন।",
     menu
   );
 });
 
 bot.command("id", (ctx) => {
-  ctx.reply(`Your Telegram ID: ${ctx.from.id}`);
+  return ctx.reply(`Your Telegram ID: ${ctx.from.id}`);
 });
 
 bot.hears("💎 Diamond Packages", (ctx) => {
   const list = products.slice(0, 12)
     .map(p => `💎 ${p[0]} — ৳${p[1]}`).join("\n");
-  ctx.reply("💎 DIAMOND PACKAGES\n\n" + list);
+
+  return ctx.reply("💎 DIAMOND PACKAGES\n\n" + list, menu);
 });
 
 bot.hears("🎫 Membership Passes", (ctx) => {
   const list = products.slice(12)
     .map(p => `🎫 ${p[0]} — ৳${p[1]}`).join("\n");
-  ctx.reply("🎫 MEMBERSHIP PASSES\n\n" + list);
+
+  return ctx.reply("🎫 MEMBERSHIP PASSES\n\n" + list, menu);
 });
 
 bot.hears("🛒 Buy Now", (ctx) => {
   const buttons = products.map((p, i) => [
-    Markup.button.callback(
-      `${p[0]} — ৳${p[1]}`, `product_${i}`
-    )
+    Markup.button.callback(`${p[0]} — ৳${p[1]}`, `product_${i}`)
   ]);
 
-  ctx.reply("🛒 আপনার পছন্দের প্যাকেজ নির্বাচন করুন:",
-    Markup.inlineKeyboard(buttons));
+  return ctx.reply(
+    "🛒 আপনার পছন্দের প্যাকেজ নির্বাচন করুন:",
+    Markup.inlineKeyboard(buttons)
+  );
 });
 
 bot.action(/^product_(\d+)$/, async (ctx) => {
   const p = products[Number(ctx.match[1])];
+
   if (!p) return ctx.answerCbQuery("Invalid package");
 
   users.set(ctx.from.id, {
@@ -78,21 +87,140 @@ bot.action(/^product_(\d+)$/, async (ctx) => {
   });
 
   await ctx.answerCbQuery();
-  await ctx.reply(`আপনি নির্বাচন করেছেন: ${p[0]}\nমূল্য: ৳${p[1]}\n\nএখন Free Fire UID পাঠান।`);
+
+  return ctx.reply(
+    `আপনি নির্বাচন করেছেন: ${p[0]}\nমূল্য: ৳${p[1]}\n\nএখন Free Fire UID পাঠান।`
+  );
 });
 
-bot.on("text", async (ctx) => {
+// Payment selection
+bot.action(/^pay_(bkash|nagad)$/, async (ctx) => {
   const state = users.get(ctx.from.id);
-  if (!state) return;
 
+  if (!state || state.step !== "payment") {
+    return ctx.answerCbQuery("Order session expired");
+  }
+
+  state.payment = ctx.match[1] === "bkash" ? "bKash" : "Nagad";
+  state.step = "trx";
+
+  await ctx.answerCbQuery();
+
+  return ctx.reply(
+    `💳 ${state.payment} Personal\n` +
+    `Number: ${PAYMENT_NUMBER}\n\n` +
+    `৳${state.price} টাকা পাঠিয়ে Transaction ID দিন।\n\n` +
+    "⚠️ পেমেন্ট যাচাইয়ের আগে অর্ডার Approved হবে না।"
+  );
+});
+
+// Approve order
+bot.action(/^approve_(.+)$/, async (ctx) => {
+  if (!ADMIN_ID || String(ctx.from.id) !== String(ADMIN_ID)) {
+    return ctx.answerCbQuery("Not authorized");
+  }
+
+  const order = orders.get(ctx.match[1]);
+
+  if (!order) return ctx.answerCbQuery("Order not found");
+
+  order.status = "Approved";
+
+  await ctx.answerCbQuery("Approved");
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+
+  await bot.telegram.sendMessage(
+    order.user,
+    `✅ আপনার অর্ডার ${order.id} Approved হয়েছে।`
+  );
+
+  return ctx.reply(`Order ${order.id} approved.`);
+});
+
+// Reject order
+bot.action(/^reject_(.+)$/, async (ctx) => {
+  if (!ADMIN_ID || String(ctx.from.id) !== String(ADMIN_ID)) {
+    return ctx.answerCbQuery("Not authorized");
+  }
+
+  const order = orders.get(ctx.match[1]);
+
+  if (!order) return ctx.answerCbQuery("Order not found");
+
+  order.status = "Rejected";
+
+  await ctx.answerCbQuery("Rejected");
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+
+  await bot.telegram.sendMessage(
+    order.user,
+    `❌ আপনার অর্ডার ${order.id} Rejected হয়েছে। Admin-এর সাথে যোগাযোগ করুন।`
+  );
+
+  return ctx.reply(`Order ${order.id} rejected.`);
+});
+
+// My Orders
+bot.hears("📦 My Orders", (ctx) => {
+  const mine = [...orders.values()]
+    .filter(o => o.user === ctx.from.id);
+
+  if (!mine.length) {
+    return ctx.reply("📦 আপনার কোনো অর্ডার পাওয়া যায়নি।", menu);
+  }
+
+  const result = mine.map(o =>
+    `🆔 Order: ${o.id}\n` +
+    `📦 Package: ${o.product}\n` +
+    `💰 Price: ৳${o.price}\n` +
+    `🎮 UID: ${o.uid}\n` +
+    `💳 Payment: ${o.payment}\n` +
+    `📌 Status: ${o.status}`
+  ).join("\n\n");
+
+  return ctx.reply("📦 YOUR ORDERS\n\n" + result, menu);
+});
+
+// Payment information
+bot.hears("💳 Payment", (ctx) => {
+  return ctx.reply(
+    "💳 PAYMENT METHODS\n\n" +
+    "🟣 bKash Personal\n" +
+    `Number: ${PAYMENT_NUMBER}\n\n` +
+    "🟠 Nagad Personal\n" +
+    `Number: ${PAYMENT_NUMBER}\n\n` +
+    "⚠️ টাকা পাঠানোর আগে প্যাকেজের মূল্য নিশ্চিত করুন।",
+    menu
+  );
+});
+
+// Contact Admin
+bot.hears("📞 Contact Admin", (ctx) => {
+  return ctx.reply(
+    "📞 CONTACT ADMIN\n\n" +
+    "কোনো সমস্যা হলে Admin-এর সাথে যোগাযোগ করুন।\n\n" +
+    "WhatsApp: https://wa.me/8801337445694",
+    Markup.inlineKeyboard([
+      [Markup.button.url("📲 Contact on WhatsApp", "https://wa.me/8801337445694")]
+    ])
+  );
+});
+
+// Text handler - keep this AFTER menu handlers
+bot.on("text", async (ctx) => {
   const value = ctx.message.text.trim();
+  const state = users.get(ctx.from.id);
+
+  if (!state) return;
 
   if (state.step === "uid") {
     if (!/^\d{5,15}$/.test(value)) {
       return ctx.reply("সঠিক Free Fire UID দিন।");
     }
+
     state.uid = value;
     state.step = "payment";
+
     return ctx.reply(
       "পেমেন্ট মাধ্যম নির্বাচন করুন:",
       Markup.inlineKeyboard([
@@ -108,6 +236,7 @@ bot.on("text", async (ctx) => {
     }
 
     const id = "DDS" + Date.now().toString().slice(-8);
+
     const order = {
       id,
       user: ctx.from.id,
@@ -151,87 +280,19 @@ bot.on("text", async (ctx) => {
         ])
       );
     }
+
     return;
   }
 
-  ctx.reply("Menu থেকে আবার শুরু করুন।", menu);
+  return ctx.reply("Menu থেকে আবার শুরু করুন।", menu);
 });
 
-bot.action(/^pay_(bkash|nagad)$/, async (ctx) => {
-  const state = users.get(ctx.from.id);
-  if (!state || state.step !== "payment") {
-    return ctx.answerCbQuery("Order session expired");
-  }
-
-  state.payment = ctx.match[1] === "bkash" ? "bKash" : "Nagad";
-  state.step = "trx";
-
-  await ctx.answerCbQuery();
-  await ctx.reply(
-    `💳 ${state.payment} Personal\n` +
-    `Number: 01337445694\n\n` +
-    `৳${state.price} টাকা পাঠিয়ে Transaction ID দিন।\n\n` +
-    `⚠️ পেমেন্ট যাচাইয়ের আগে অর্ডার সম্পন্ন হবে না।`
-  );
+bot.catch((err) => {
+  console.error("Bot error:", err);
 });
-
-bot.action(/^approve_(.+)$/, async (ctx) => {
-  if (!ADMIN_ID || String(ctx.from.id) !== String(ADMIN_ID))
-    return ctx.answerCbQuery("Not authorized");
-
-  const order = orders.get(ctx.match[1]);
-  if (!order) return ctx.answerCbQuery("Order not found");
-
-  order.status = "Approved";
-  await ctx.answerCbQuery("Approved");
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-  await bot.telegram.sendMessage(
-    order.user,
-    `✅ আপনার অর্ডার ${order.id} Approved হয়েছে।`
-  );
-  await ctx.reply(`Order ${order.id} approved.`);
-});
-
-bot.action(/^reject_(.+)$/, async (ctx) => {
-  if (!ADMIN_ID || String(ctx.from.id) !== String(ADMIN_ID))
-    return ctx.answerCbQuery("Not authorized");
-
-  const order = orders.get(ctx.match[1]);
-  if (!order) return ctx.answerCbQuery("Order not found");
-
-  order.status = "Rejected";
-  await ctx.answerCbQuery("Rejected");
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-  await bot.telegram.sendMessage(
-    order.user,
-    `❌ আপনার অর্ডার ${order.id} Rejected হয়েছে। Admin-এর সাথে যোগাযোগ করুন।`
-  );
-});
-
-bot.hears("📦 My Orders", (ctx) => {
-  const mine = [...orders.values()].filter(o => o.user === ctx.from.id);
-  if (!mine.length) return ctx.reply("আপনার কোনো অর্ডার পাওয়া যায়নি।");
-
-  ctx.reply(mine.map(o =>
-    `${o.id}\n${o.product}\n৳${o.price}\nStatus: ${o.status}`
-  ).join("\n\n"));
-});
-
-bot.hears("💳 Payment", (ctx) => {
-  ctx.reply(
-    "💳 PAYMENT METHODS\n\n" +
-    "bKash Personal: 01337445694\n" +
-    "Nagad Personal: 01337445694"
-  );
-});
-
-bot.hears("📞 Contact Admin", (ctx) => {
-  ctx.reply("WhatsApp: https://wa.me/8801337445694");
-});
-
-bot.catch(err => console.error("Bot error:", err));
 
 bot.launch();
+
 console.log("💎 DIDAR DIAMOND STORE BOT STARTED!");
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
